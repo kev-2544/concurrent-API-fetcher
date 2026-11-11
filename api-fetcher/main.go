@@ -1,13 +1,12 @@
 package main
 
 import (
-	"fmt"
-	"net/http"
-	"time"
-	"io"
 	"context"
-
-	
+	"fmt"
+	"io"
+	"net/http"
+	"sync"
+	"time"
 )
 
 //endpoint struct rep the endpoint to be fetched
@@ -18,20 +17,17 @@ type Endpoint struct {
 
 //results strtuct rep the result of the fetch
 type Result struct {
-	Name string
-	URL  string
-	Data []byte
-	Err error
+	Name     string
+	URL      string
+	Data     []byte
+	Err      error
 	Duration time.Duration
 }
 
 //fetcher is responsible for making the request to the endpoint and returning the result
 type Fetcher struct {
 	client *http.Client
-		
-	}
-
-
+}
 
 //NewFetcher creates and returns a new fetcher with a timeout
 func NewFetcher(timeout time.Duration) *Fetcher {
@@ -45,7 +41,7 @@ func NewFetcher(timeout time.Duration) *Fetcher {
 
 //Fetch makes a request to the endpoint and returns the result
 //returns response with data or an error if any
-func(f *Fetcher) Fetch(ctx context.Context, endpoint Endpoint) Result {
+func (f *Fetcher) Fetch(ctx context.Context, endpoint Endpoint) Result {
 
 	//start the timer to measure the duration of the request
 	start := time.Now()
@@ -53,7 +49,7 @@ func(f *Fetcher) Fetch(ctx context.Context, endpoint Endpoint) Result {
 	//prepare a result with endpoint info
 	result := Result{
 		Name: endpoint.Name,
-		URL: endpoint.URL,
+		URL:  endpoint.URL,
 	}
 
 	//make the request to the endpoint
@@ -62,20 +58,20 @@ func(f *Fetcher) Fetch(ctx context.Context, endpoint Endpoint) Result {
 		http.MethodGet,
 		endpoint.URL,
 		nil,
-		
 	)
 	if err != nil {
 		result.Err = err
+		result.Duration = time.Since(start)
 		return result
 	}
 	//execute the request
 	resp, err := f.client.Do(req)
 
 	if err != nil {
-	result.Err = err
-	result.Duration = time.Since(start)
-	return result
-    }
+		result.Err = err
+		result.Duration = time.Since(start)
+		return result
+	}
 
 	//close the response body when done
 	defer resp.Body.Close()
@@ -103,7 +99,6 @@ func(f *Fetcher) Fetch(ctx context.Context, endpoint Endpoint) Result {
 	return result
 }
 
-
 func main() {
 
 	//create a context with 10s deadline all req will share this context
@@ -114,7 +109,7 @@ func main() {
 	defer cancel()
 
 	//create our http fetcher
-	fetcher := NewFetcher(15*time.Second)
+	fetcher := NewFetcher(15 * time.Second)
 
 	//define the api endpoint to be fetched
 	endpoints := []Endpoint{
@@ -135,13 +130,22 @@ func main() {
 	//create a buffered channel to hold the results of the fetches
 	results := make(chan Result, len(endpoints))
 
+	//create a waitGroup to track our workers and wait for them to finish
+	var wg sync.WaitGroup
+
 	fmt.Println("Concurrent API Fetcher v1.0")
 	fmt.Println("------------------------------------------")
 	fmt.Println("Starting API requests...")
 
 	//FAN-OUT: start a goroutine for each endpoint to fetch the data concurrently
 	for _, endpoint := range endpoints {
+
+		//register worker to waitgroup before launching it
+		wg.Add(1)
 		go func(endpoint Endpoint) {
+
+			//signal that the worker is done when the function returns
+			defer wg.Done()
 
 			//fetch api data
 			result := fetcher.Fetch(ctx, endpoint)
@@ -152,10 +156,31 @@ func main() {
 		}(endpoint)
 
 	}
+
+	//start a separate goroutine to close the channel
+	go func() {
+		//wait till all workers finish
+		wg.Wait()
+
+		close(results)
+	}()
+
+	//done fires when the context deadline expires; set to nil after it fires
+	//so the select stops picking it and keeps draining results
+	done := ctx.Done()
+
 	//FAN-IN: collect the results from the result channel
-	for i := 0; i < len(endpoints); i++ {
+	for {
 		select {
-		case result := <-results:
+
+		//receive results from workers
+		case result, ok := <-results:
+
+			//channel has been closed or drained
+			if !ok {
+				fmt.Println("\nAll API requests processed")
+				return
+			}
 
 			//handle failed requests independently
 			if result.Err != nil {
@@ -166,21 +191,23 @@ func main() {
 				)
 
 				continue
-			
+
 			}
 
 			//display successful results
 			fmt.Printf(
 				"\n[%s] Request successful\n",
-			result.Name,
-		)
+				result.Name,
+			)
 
-		fmt.Printf("Duration: %v\n", result.Duration)
-		fmt.Printf("Response size: %d bytes\n", len(result.Data))
-	case <- ctx.Done():
-		
-		//stop waiting when the context expires
-		fmt.Println("\nAll Api requests processed")
+			fmt.Printf("Duration: %v\n", result.Duration)
+			fmt.Printf("Response size: %d bytes\n", len(result.Data))
+		case <-done:
+
+			//stop waiting when the context expires
+			fmt.Println("\nContext deadline reached", ctx.Err())
+
+			done = nil
 		}
 	}
 
