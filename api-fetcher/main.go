@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	"io"
+	"context"
+
 	
 )
 
@@ -16,7 +19,7 @@ type Endpoint struct {
 //results strtuct rep the result of the fetch
 type results struct {
 	Name string
-	url string
+	URL  string
 	Data []byte
 	Err error
 	Duration time.Duration
@@ -38,6 +41,66 @@ func NewFetcher(timeout time.Duration) *Fetcher {
 		},
 	}
 
+}
+
+//Fetch makes a request to the endpoint and returns the result
+//returns response with data or an error if any
+func(f *Fetcher) Fetch(ctx context.Context, endpoint Endpoint) Result {
+
+	//start the timer to measure the duration of the request
+	start := time.Now()
+
+	//prepare a result with endpoint info
+	result := Result{
+		Name: endpoint.Name,
+		URL: endpoint.URL,
+	}
+
+	//make the request to the endpoint
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		endpoint.URL,
+		nil,
+		
+	)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	//execute the request
+	resp, err := f.client.Do(req)
+
+	if err != nil {
+	result.Err = err
+	result.Duration = time.Since(start)
+	return result
+    }
+
+	//close the response body when done
+	defer resp.Body.Close()
+
+	//check the returned api status code
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Err = fmt.Errorf("unexpected HTTP status %s", resp.Status)
+		result.Duration = time.Since(start)
+		return result
+	}
+
+	//read the response body into memory
+	data, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		result.Err = err
+		result.Duration = time.Since(start)
+		return result
+
+	}
+
+	//store the data and duration in the result
+	result.Data = data
+	result.Duration = time.Since(start)
+	return result
 }
 
 func main(){
